@@ -133,7 +133,16 @@ COPY root/ /
 
 # Defensive: never let volume-staged file permissions leak onto core system
 # paths (this bit us once during development — a COPY from a restrictively
-# permissioned build context silently made ...[truncated]
+# permissioned build context silently made /usr and /etc mode 700 in the
+# image, locking the non-root runtime user out of the entire filesystem).
+# Force sane perms on everything COPY'd from root/, and make the s6-rc
+# run/up scripts + pull-model executable regardless of what the build
+# context's own file modes were.
+RUN find /etc/s6-overlay -type d -exec chmod 755 {} + && \
+    find /etc/s6-overlay -type f -exec chmod 644 {} + && \
+    find /etc/s6-overlay -type f \( -name run -o -name up \) -exec chmod 755 {} + && \
+    chmod 755 /usr/local/bin/pull-model && \
+    chmod 755 / /usr /usr/local /usr/local/bin /etc
 
 # ---- Runtime defaults (override via `docker run -e`) --------------------------
 ENV PUID=1000 \
