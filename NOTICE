@@ -1,0 +1,27 @@
+# NOTICE
+
+This repository (`comfyui-docker`) is licensed under the GNU General Public
+License v3.0 or later — see [LICENSE](LICENSE) — matching the license of
+ComfyUI itself, which this image builds and runs.
+
+This repository contains original packaging code (Dockerfile, s6-overlay
+service definitions, the `pull-model` script, documentation). It does **not**
+vendor or redistribute the source code of the third-party projects it builds
+against — the Dockerfile fetches and compiles them from their own upstream
+repositories at image-build time, under their own licenses:
+
+| Project | License | Source |
+|---|---|---|
+| [ComfyUI](https://github.com/comfyanonymous/ComfyUI) | GPL-3.0-or-later | comfyanonymous/ComfyUI |
+| [SageAttention](https://github.com/thu-ml/SageAttention) | Apache-2.0 | thu-ml/SageAttention |
+| [comfy-cli](https://github.com/Comfy-Org/comfy-cli) | GPL-3.0 | Comfy-Org/comfy-cli |
+| [comfy-mcp](https://github.com/Comfy-Org/comfy-mcp) | AGPL-3.0-or-later OR Commercial | Comfy-Org/comfy-mcp |
+| [mcp-proxy](https://github.com/sparfenyuk/mcp-proxy) | MIT | sparfenyuk/mcp-proxy |
+| [s6-overlay](https://github.com/just-containers/s6-overlay) | ISC | just-containers/s6-overlay |
+| [PyTorch](https://github.com/pytorch/pytorch) | BSD-3-Clause | pytorch/pytorch |
+
+The resulting container image, as a combined/distributed work, is offered
+under the terms each component's license requires for redistribution.
+Consult each project's own license for the specific terms that apply to that
+component. If you believe any license obligation isn't correctly reflected
+here, please open an issue.

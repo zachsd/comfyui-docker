@@ -1,0 +1,270 @@
+#!/usr/bin/env python3
+"""
+pull-model — fetch a model from Hugging Face or CivitAI into the right
+ComfyUI /models subfolder, using whichever API token the container was
+given (HF_TOKEN_FILE / HF_TOKEN or CIVITAI_TOKEN_FILE / CIVITAI_API_TOKEN).
+
+See docs/models.md for full usage and examples. Quick reference:
+
+    pull-model hf <repo_id> <file_in_repo> [<file_in_repo> ...]
+    pull-model hf Lightricks/LTX-2.5 vae/ltx-2.5-video-vae-bf16.safetensors
+
+    pull-model civitai <model-version-id> [--dest <subfolder>]
+    pull-model civitai 2514310
+    pull-model civitai 2514310 --dest loras
+
+Run it inside the running container:
+    docker exec -it comfyui pull-model hf ...
+    docker exec -it comfyui pull-model civitai ...
+"""
+import argparse
+import json
+import os
+import sys
+import urllib.error
+import urllib.request
+from pathlib import Path
+
+MODELS_ROOT = Path(os.environ.get("COMFY_MODELS_ROOT", "/models"))
+
+# CivitAI's model "type" field -> ComfyUI /models subfolder. Extend this if
+# CivitAI adds types or your custom nodes expect a different folder.
+CIVITAI_TYPE_TO_SUBFOLDER = {
+    "Checkpoint": "checkpoints",
+    "LORA": "loras",
+    "LoCon": "loras",
+    "DoRA": "loras",
+    "TextualInversion": "embeddings",
+    "VAE": "vae",
+    "ControlNet": "controlnet",
+    "Upscaler": "upscale_models",
+    "MotionModule": "other",
+    "Poses": "other",
+    "Wildcards": "other",
+    "Workflows": "other",
+    "Other": "other",
+}
+
+
+def eprint(*a, **kw):
+    print(*a, file=sys.stderr, **kw)
+
+
+def read_token(env_file_var: str, env_direct_var: str) -> str | None:
+    """Same file-or-direct-env convention used by the container's HF/CivitAI
+    auth wiring: prefer a mounted secret file, fall back to a plain env var.
+    """
+    token_file = os.environ.get(env_file_var)
+    if token_file and Path(token_file).is_file():
+        return Path(token_file).read_text().strip()
+    direct = os.environ.get(env_direct_var)
+    if direct:
+        return direct.strip()
+    return None
+
+
+def human_size(n: int) -> str:
+    for unit in ("B", "KB", "MB", "GB", "TB"):
+        if n < 1024:
+            return f"{n:.1f}{unit}"
+        n /= 1024
+    return f"{n:.1f}PB"
+
+
+def download_with_progress(url: str, dest: Path, headers: dict) -> None:
+    dest.parent.mkdir(parents=True, exist_ok=True)
+    tmp = dest.with_suffix(dest.suffix + ".part")
+    req = urllib.request.Request(url, headers=headers)
+    try:
+        with urllib.request.urlopen(req) as resp, open(tmp, "wb") as f:
+            total = int(resp.headers.get("Content-Length", 0))
+            read = 0
+            chunk = 1024 * 1024
+            while True:
+                buf = resp.read(chunk)
+                if not buf:
+                    break
+                f.write(buf)
+                read += len(buf)
+                if total:
+                    pct = read * 100 // total
+                    print(
+                        f"\r  {human_size(read)} / {human_size(total)} ({pct}%)",
+                        end="",
+                        file=sys.stderr,
+                        flush=True,
+                    )
+                else:
+                    print(f"\r  {human_size(read)}", end="", file=sys.stderr, flush=True)
+        print(file=sys.stderr)
+    except urllib.error.HTTPError as e:
+        tmp.unlink(missing_ok=True)
+        body = e.read().decode("utf-8", "replace")[:500]
+        eprint(f"ERROR: HTTP {e.code} downloading {url}\n{body}")
+        sys.exit(1)
+    except BaseException:
+        tmp.unlink(missing_ok=True)
+        raise
+    tmp.rename(dest)
+
+
+# ---------------------------------------------------------------------------
+# Hugging Face
+# ---------------------------------------------------------------------------
+def cmd_hf(args: argparse.Namespace) -> None:
+    token = read_token("HF_TOKEN_FILE", "HF_TOKEN")
+    if not token:
+        eprint(
+            "WARNING: no Hugging Face token found (HF_TOKEN_FILE/HF_TOKEN unset). "
+            "Gated repos will fail; public repos may still work but rate-limited."
+        )
+
+    # Delegate to `hf download` (already installed in the image) rather than
+    # reimplementing the HF Hub protocol — it handles resumable downloads,
+    # LFS pointers, and repo-relative folder structure (text_encoders/,
+    # diffusion_models/, vae/, etc.) for us. --local-dir /models drops files
+    # exactly where ComfyUI expects them *only* when the repo's own folder
+    # names happen to match ComfyUI's (Lightricks/LTX-2.5 does; many repos
+    # don't). Pass --dest to force everything into one /models subfolder
+    # regardless of the repo's internal layout.
+    import shutil
+    import subprocess
+
+    env = os.environ.copy()
+    if token:
+        env["HF_TOKEN"] = token
+
+    if args.dest:
+        dest_dir = MODELS_ROOT / args.dest
+        dest_dir.mkdir(parents=True, exist_ok=True)
+        cmd = ["hf", "download", args.repo_id, *args.files, "--local-dir", str(dest_dir)]
+        print(f"$ {' '.join(cmd)}")
+        result = subprocess.run(cmd, env=env)
+        if result.returncode != 0:
+            sys.exit(result.returncode)
+        # `hf download --local-dir` still recreates the repo's internal
+        # subfolders under dest_dir; flatten so the file ends up directly at
+        # /models/<dest>/<filename> as requested.
+        for rel in args.files:
+            src = dest_dir / rel
+            if src.is_file():
+                target = dest_dir / Path(rel).name
+                if src != target:
+                    shutil.move(str(src), str(target))
+        # Clean up any now-empty subdirectories left behind by the flatten.
+        for rel in args.files:
+            parent = (dest_dir / rel).parent
+            while parent != dest_dir and parent.exists() and not any(parent.iterdir()):
+                empty = parent
+                parent = parent.parent
+                empty.rmdir()
+    else:
+        cmd = ["hf", "download", args.repo_id, *args.files, "--local-dir", str(MODELS_ROOT)]
+        print(f"$ {' '.join(cmd)}")
+        result = subprocess.run(cmd, env=env)
+        sys.exit(result.returncode)
+
+
+# ---------------------------------------------------------------------------
+# CivitAI
+# ---------------------------------------------------------------------------
+def civitai_api_get(path: str, token: str | None) -> dict:
+    url = f"https://civitai.com/api/v1/{path}"
+    headers = {"Accept": "application/json"}
+    if token:
+        headers["Authorization"] = f"Bearer {token}"
+    req = urllib.request.Request(url, headers=headers)
+    try:
+        with urllib.request.urlopen(req) as resp:
+            return json.loads(resp.read())
+    except urllib.error.HTTPError as e:
+        body = e.read().decode("utf-8", "replace")[:500]
+        eprint(f"ERROR: HTTP {e.code} from CivitAI API ({url})\n{body}")
+        sys.exit(1)
+
+
+def cmd_civitai(args: argparse.Namespace) -> None:
+    token = read_token("CIVITAI_TOKEN_FILE", "CIVITAI_API_TOKEN")
+    if not token:
+        eprint(
+            "WARNING: no CivitAI token found (CIVITAI_TOKEN_FILE/CIVITAI_API_TOKEN unset). "
+            "Gated/login-required models will fail to download."
+        )
+
+    version_id = args.model_version_id
+    print(f"Looking up CivitAI model version {version_id}...")
+    meta = civitai_api_get(f"model-versions/{version_id}", token)
+
+    files = meta.get("files", [])
+    if not files:
+        eprint(f"ERROR: model version {version_id} has no downloadable files")
+        sys.exit(1)
+
+    # Prefer the file CivitAI marks primary; fall back to the first.
+    file_meta = next((f for f in files if f.get("primary")), files[0])
+    filename = file_meta["name"]
+    download_url = file_meta["downloadUrl"]
+
+    model_type = meta.get("model", {}).get("type", "Other")
+    subfolder = args.dest or CIVITAI_TYPE_TO_SUBFOLDER.get(model_type, "other")
+    dest = MODELS_ROOT / subfolder / filename
+
+    print(f"Model:    {meta.get('model', {}).get('name', '(unknown)')}")
+    print(f"Version:  {meta.get('name', '(unknown)')}")
+    print(f"Type:     {model_type}  ->  /models/{subfolder}/")
+    print(f"File:     {filename} ({human_size(file_meta.get('sizeKB', 0) * 1024)})")
+    print(f"Dest:     {dest}")
+
+    if dest.exists() and not args.force:
+        print(f"Already exists at {dest} (use --force to re-download). Skipping.")
+        return
+
+    url = download_url
+    if token:
+        sep = "&" if "?" in url else "?"
+        url = f"{url}{sep}token={token}"
+
+    print(f"Downloading to {dest} ...")
+    download_with_progress(url, dest, headers={})
+    print(f"Done: {dest}")
+
+
+def main() -> None:
+    parser = argparse.ArgumentParser(
+        prog="pull-model",
+        description="Fetch a model from Hugging Face or CivitAI into the right ComfyUI /models subfolder.",
+    )
+    sub = parser.add_subparsers(dest="source", required=True)
+
+    hf = sub.add_parser("hf", help="Download file(s) from a Hugging Face repo")
+    hf.add_argument("repo_id", help="e.g. Lightricks/LTX-2.5")
+    hf.add_argument(
+        "files",
+        nargs="+",
+        help="Repo-relative file paths, e.g. vae/ltx-2.5-video-vae-bf16.safetensors "
+        "(the leading folder should match a ComfyUI /models subfolder name)",
+    )
+    hf.add_argument(
+        "--dest",
+        help="Force all files into this one /models subfolder (e.g. checkpoints), "
+        "flattening the repo's internal path. Use when the repo's own folder "
+        "names don't match ComfyUI's /models layout.",
+    )
+    hf.set_defaults(func=cmd_hf)
+
+    civ = sub.add_parser("civitai", help="Download a model version from CivitAI")
+    civ.add_argument("model_version_id", help="The numeric model VERSION id (not the model id)")
+    civ.add_argument(
+        "--dest",
+        help="Override the destination /models subfolder "
+        "(auto-detected from CivitAI's model type by default)",
+    )
+    civ.add_argument("--force", action="store_true", help="Re-download even if the file already exists")
+    civ.set_defaults(func=cmd_civitai)
+
+    args = parser.parse_args()
+    args.func(args)
+
+
+if __name__ == "__main__":
+    main()

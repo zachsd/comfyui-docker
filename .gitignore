@@ -1,0 +1,9 @@
+secrets/
+config/
+models/
+input/
+output/
+custom_nodes/
+*.tar
+*.tar.xz
+.DS_Store

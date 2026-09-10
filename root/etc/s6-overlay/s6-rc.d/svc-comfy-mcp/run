@@ -1,0 +1,33 @@
+#!/command/with-contenv bash
+set -euo pipefail
+
+if [[ "${COMFY_MCP_ENABLED:-true}" != "true" ]]; then
+    echo "[svc-comfy-mcp] COMFY_MCP_ENABLED=false, sleeping (service disabled)"
+    exec sleep infinity
+fi
+
+MCP_PORT="${COMFY_MCP_PORT:-8189}"
+COMFYUI_PORT="${COMFYUI_PORT:-8188}"
+
+# comfy-mcp talks to ComfyUI over loopback (they're in the same container),
+# regardless of what COMFYUI_PORT the outside world reaches this container
+# on.
+export COMFYUI_URL="http://127.0.0.1:${COMFYUI_PORT}"
+
+echo "[svc-comfy-mcp] Waiting for ComfyUI on ${COMFYUI_URL}..."
+for i in $(seq 1 60); do
+    if curl -fsS -o /dev/null "${COMFYUI_URL}/system_stats" 2>/dev/null; then
+        echo "[svc-comfy-mcp] ComfyUI is up."
+        break
+    fi
+    sleep 2
+done
+
+echo "[svc-comfy-mcp] Starting comfy-mcp (wrapped by mcp-proxy) on 0.0.0.0:${MCP_PORT}"
+echo "[svc-comfy-mcp]   -> streamable HTTP: http://<host>:${MCP_PORT}/mcp"
+echo "[svc-comfy-mcp]   -> SSE:             http://<host>:${MCP_PORT}/sse"
+exec gosu comfy /opt/uv-tools/bin/mcp-proxy \
+    "--port=${MCP_PORT}" \
+    --host=0.0.0.0 \
+    --pass-environment \
+    -- comfy-mcp

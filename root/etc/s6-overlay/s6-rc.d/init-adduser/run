@@ -1,0 +1,79 @@
+#!/command/with-contenv bash
+# Create/update the runtime user+group to match PUID/PGID, and chown the
+# volume mount points to it. Mirrors LinuxServer.io's PUID/PGID convention:
+# https://docs.linuxserver.io/general/understanding-puid-and-pgid/
+set -euo pipefail
+
+PUID="${PUID:-1000}"
+PGID="${PGID:-1000}"
+
+echo "
+-------------------------------------
+     _____             __       _    _ _____
+    / ____|           / _|     | |  | |_   _|
+   | |    ___  _ __ | |_ _   _| |  | | | |
+   | |   / _ \| '_ \|  _| | | | |  | | | |
+   | |__| (_) | | | | | | |_| | |__| |_| |_
+    \_____\___/|_| |_|_|  \__, |\____/|_____|
+                           __/ |
+                          |___/
+   ComfyUI + SageAttention, DGX Spark edition
+-------------------------------------
+GID/UID
+-------------------------------------
+User uid:    ${PUID}
+User gid:    ${PGID}
+-------------------------------------
+"
+
+if ! getent group comfy >/dev/null 2>&1; then
+    groupadd -o -g "${PGID}" comfy
+fi
+if ! id comfy >/dev/null 2>&1; then
+    useradd -o -u "${PUID}" -g "${PGID}" -M -d /config -s /bin/bash comfy
+fi
+
+# Reconcile in case PUID/PGID changed between runs (same convention as
+# LinuxServer's init-adduser: usermod/groupmod rather than recreate).
+groupmod -o -g "${PGID}" comfy || true
+usermod -o -u "${PUID}" comfy || true
+
+mkdir -p /config /models /input /output /custom_nodes
+for d in /config /models /input /output /custom_nodes; do
+    chown "${PUID}:${PGID}" "$d" || true
+done
+
+# Seed /config with default files on first boot only (never overwrite user
+# changes on restart) — same convention as LinuxServer's /defaults handling.
+if [[ -d /defaults ]]; then
+    for f in /defaults/*; do
+        target="/config/$(basename "$f")"
+        [[ -e "$target" ]] || cp -r "$f" "$target"
+    done
+    chown -R "${PUID}:${PGID}" /config
+fi
+
+# /models subfolders that ComfyUI/pull-model expect to exist.
+for sub in checkpoints clip clip_vision configs controlnet diffusers \
+           diffusion_models embeddings gligen hypernetworks \
+           latent_upscale_models loras model_patches photomaker \
+           style_models text_encoders unet upscale_models vae vae_approx \
+           audio_encoders other; do
+    mkdir -p "/models/${sub}"
+done
+chown -R "${PUID}:${PGID}" /models
+
+# The venv + ComfyUI install are pre-owned by 1000:1000 in the image (see
+# Dockerfile). Only pay for a recursive chown when the operator actually
+# overrides PUID/PGID away from that default.
+if [[ "${PUID}" != "1000" || "${PGID}" != "1000" ]]; then
+    chown -R "${PUID}:${PGID}" "${VENV:-/opt/venv}" "${COMFYUI_PATH:-/opt/ComfyUI}" /opt/uv-tools || true
+fi
+
+# Timezone (LinuxServer TZ convention: an Olson name like America/Denver).
+if [[ -n "${TZ:-}" && -f "/usr/share/zoneinfo/${TZ}" ]]; then
+    ln -snf "/usr/share/zoneinfo/${TZ}" /etc/localtime
+    echo "${TZ}" > /etc/timezone
+fi
+
+umask "${UMASK:-022}"

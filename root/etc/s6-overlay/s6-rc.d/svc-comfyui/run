@@ -1,0 +1,98 @@
+#!/command/with-contenv bash
+set -euo pipefail
+
+COMFY_DIR="${COMFYUI_PATH:-/opt/ComfyUI}"
+PORT="${COMFYUI_PORT:-8188}"
+PUID="${PUID:-1000}"
+PGID="${PGID:-1000}"
+
+echo "[svc-comfyui] Python: $("${VENV:-/opt/venv}"/bin/python --version)"
+echo "[svc-comfyui] Torch:  $("${VENV:-/opt/venv}"/bin/python -c 'import torch; print(torch.__version__)')"
+
+# Hugging Face auth (optional). See docs/models.md for the full behavior.
+if [[ -n "${HF_TOKEN_FILE:-}" && -f "${HF_TOKEN_FILE}" ]]; then
+    export HF_TOKEN="$(cat "${HF_TOKEN_FILE}")"
+fi
+if [[ -n "${HF_TOKEN:-}" ]]; then
+    echo "[svc-comfyui] Logging into Hugging Face..."
+    gosu comfy "${VENV:-/opt/venv}/bin/hf" auth login --token "${HF_TOKEN}" --no-add-to-git-credential || \
+        echo "[svc-comfyui] WARNING: Hugging Face login failed, continuing without it"
+else
+    echo "[svc-comfyui] No HF token set — Hugging Face downloads will be anonymous/rate-limited"
+fi
+
+# CivitAI auth (optional, exported for pull-model and any custom node that
+# reads it). CivitAI has no login call to make — it's a plain API-token
+# query param — so we just make sure the env var is populated.
+if [[ -n "${CIVITAI_TOKEN_FILE:-}" && -f "${CIVITAI_TOKEN_FILE}" ]]; then
+    export CIVITAI_API_TOKEN="$(cat "${CIVITAI_TOKEN_FILE}")"
+fi
+if [[ -n "${CIVITAI_API_TOKEN:-}" ]]; then
+    echo "[svc-comfyui] CivitAI token set"
+else
+    echo "[svc-comfyui] No CivitAI token set — gated CivitAI model downloads will fail"
+fi
+
+# ComfyUI-Manager auto-installs itself into /custom_nodes on first boot if
+# missing (custom_nodes is a user volume, so this persists across restarts).
+if [[ ! -f "/custom_nodes/ComfyUI-Manager/__init__.py" ]]; then
+    echo "[svc-comfyui] ComfyUI-Manager missing, cloning latest into /custom_nodes..."
+    gosu comfy git clone --depth 1 https://github.com/ltdrdata/ComfyUI-Manager.git \
+        "/custom_nodes/ComfyUI-Manager" || \
+        echo "[svc-comfyui] WARNING: failed to clone ComfyUI-Manager, continuing without it"
+fi
+
+for req in /custom_nodes/*/requirements.txt; do
+    if [[ -f "$req" ]]; then
+        echo "[svc-comfyui] Installing custom node deps from: $req"
+        gosu comfy "${VENV:-/opt/venv}/bin/pip" install -q -r "$req" || true
+    fi
+done
+
+SAGE_FLAG=""
+if [[ "${ENABLE_SAGE_ATTENTION:-true}" == "true" ]]; then
+    SAGE_FLAG="--use-sage-attention"
+fi
+
+# extra_model_paths.yaml lets ComfyUI read models from /models (the bind
+# mount) while keeping its own tree under /opt/ComfyUI intact for
+# custom-node code that expects a real ComfyUI checkout layout.
+cat > /tmp/extra_model_paths.yaml <<EOF
+comfyui-docker:
+    base_path: /
+    is_default: true
+    checkpoints: models/checkpoints
+    clip: models/clip
+    clip_vision: models/clip_vision
+    configs: models/configs
+    controlnet: models/controlnet
+    diffusers: models/diffusers
+    diffusion_models: models/diffusion_models
+    embeddings: models/embeddings
+    gligen: models/gligen
+    hypernetworks: models/hypernetworks
+    latent_upscale_models: models/latent_upscale_models
+    loras: models/loras
+    model_patches: models/model_patches
+    photomaker: models/photomaker
+    style_models: models/style_models
+    text_encoders: models/text_encoders
+    unet: models/unet
+    upscale_models: models/upscale_models
+    vae: models/vae
+    vae_approx: models/vae_approx
+    audio_encoders: models/audio_encoders
+    custom_nodes: custom_nodes
+    input: input
+    output: output
+EOF
+
+echo "[svc-comfyui] Starting ComfyUI on port ${PORT} (sage attention: ${ENABLE_SAGE_ATTENTION:-true})"
+exec gosu comfy "${VENV:-/opt/venv}/bin/python" "${COMFY_DIR}/main.py" \
+    --listen 0.0.0.0 \
+    --port "${PORT}" \
+    --user-directory /config \
+    --extra-model-paths-config /tmp/extra_model_paths.yaml \
+    --disable-pinned-memory \
+    ${SAGE_FLAG} \
+    ${COMFYUI_EXTRA_ARGS:-}

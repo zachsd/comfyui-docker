@@ -1,0 +1,32 @@
+name: release-please
+
+on:
+  push:
+    branches: [main]
+
+permissions:
+  contents: write
+  pull-requests: write
+
+jobs:
+  release-please:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: googleapis/release-please-action@v5
+        id: release
+        with:
+          release-type: simple
+          config-file: release-please-config.json
+          manifest-file: .release-please-manifest.json
+
+      # NOTE: this workflow only manages the changelog + git tag + GitHub
+      # Release. It does NOT build or push the container image — the image
+      # must be built on real aarch64/GB10 hardware (a DGX Spark), so
+      # publishing is a manual step after this creates a release. See
+      # docs/building.md, "Publishing a release" for the exact commands.
+      - name: Release created
+        if: ${{ steps.release.outputs.release_created }}
+        run: |
+          echo "Release ${{ steps.release.outputs.tag_name }} created."
+          echo "Next: build + push the image from the DGX Spark for this tag."
+          echo "See docs/building.md, 'Publishing a release'."

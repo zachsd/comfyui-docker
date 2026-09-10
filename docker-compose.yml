@@ -1,0 +1,48 @@
+services:
+  comfyui:
+    image: ghcr.io/zachsd/comfyui-docker:latest
+    # Also published to: docker.io/zachsd/comfyui-docker:latest
+    container_name: comfyui
+    restart: unless-stopped
+    runtime: nvidia
+    environment:
+      - PUID=1000
+      - PGID=1000
+      - TZ=Etc/UTC
+      - COMFYUI_PORT=8188
+      - ENABLE_SAGE_ATTENTION=true
+      - COMFY_MCP_ENABLED=true
+      - COMFY_MCP_PORT=8189
+      # Optional secrets (see docs/authentication.md). Either mount a file
+      # (recommended, see the `secrets:` block below) or set the token
+      # directly as an env var — HF_TOKEN / CIVITAI_API_TOKEN.
+      - HF_TOKEN_FILE=/run/secrets/hf_token
+      - CIVITAI_TOKEN_FILE=/run/secrets/civitai_token
+    ports:
+      - "8188:8188"   # ComfyUI web UI / API
+      - "8189:8189"   # bundled comfy-mcp server (streamable HTTP at /mcp)
+    volumes:
+      - ./config:/config
+      - ./models:/models
+      - ./input:/input
+      - ./output:/output
+      - ./custom_nodes:/custom_nodes
+    secrets:
+      - hf_token
+      - civitai_token
+    deploy:
+      resources:
+        reservations:
+          devices:
+            - driver: nvidia
+              count: 1
+              capabilities: [gpu]
+
+# Create these files with your actual tokens before `docker compose up`, or
+# remove the `secrets:` blocks above/below entirely if you don't need gated
+# model downloads.
+secrets:
+  hf_token:
+    file: ./secrets/hf_token.txt
+  civitai_token:
+    file: ./secrets/civitai_token.txt

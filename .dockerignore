@@ -1,0 +1,12 @@
+.git
+.github
+docs
+*.md
+!README.md
+secrets/
+config/
+models/
+input/
+output/
+custom_nodes/
+.dockerignore
