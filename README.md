@@ -21,10 +21,19 @@ A single container that runs:
   getting that combination to actually work took real debugging; see
   [docs/building.md](docs/building.md) for the full root-cause writeup if you're curious
   or want to build for a different Blackwell chip.
+- **[ComfyUI-Manager](https://github.com/Comfy-Org/ComfyUI-Manager)** (v4+, installed as
+  the `comfyui-manager` pip package and kept current on every start with
+  `pip install -U --pre comfyui-manager`) — install/update/remove custom nodes from the
+  ComfyUI UI itself.
 - **[comfy-mcp](https://github.com/Comfy-Org/comfy-mcp)**, the official Comfy-Org MCP
   server, bundled and exposed on its own port — point any MCP-speaking AI client (Claude
   Code, Claude Desktop, Cursor, etc.) at this one container for all of its ComfyUI needs,
   no separate install.
+
+This image is intentionally **vanilla**: ComfyUI + ComfyUI-Manager + the bundled MCP
+server, nothing else. No custom nodes, extra models, or third-party plugins are baked
+in — install whatever you need yourself through ComfyUI-Manager or by dropping repos into
+the `/custom_nodes` volume, so you control exactly what runs in your container.
 
 Packaged using the same conventions as
 [LinuxServer.io](https://docs.linuxserver.io/general/container-customization/) images:
@@ -92,7 +101,7 @@ Kubernetes users: see [docs/kubernetes.md](docs/kubernetes.md).
 | `/models` | All model weights, organized into ComfyUI's standard subfolders (`checkpoints/`, `loras/`, `vae/`, `diffusion_models/`, `text_encoders/`, ...) |
 | `/input` | Input images/video for img2img, controlnet references, etc. |
 | `/output` | Generated output |
-| `/custom_nodes` | Custom node installs (including ComfyUI-Manager itself, auto-installed here on first boot) |
+| `/custom_nodes` | Custom node installs (bring your own — none are baked into the image; see below) |
 
 ## Pulling a model manually
 
@@ -117,6 +126,7 @@ Full usage, examples, and how folder auto-detection works: [docs/models.md](docs
 ## Credits
 
 - [ComfyUI](https://github.com/comfyanonymous/ComfyUI) by comfyanonymous
+- [ComfyUI-Manager](https://github.com/Comfy-Org/ComfyUI-Manager) by Comfy-Org
 - [SageAttention](https://github.com/thu-ml/SageAttention) by thu-ml
 - [comfy-mcp](https://github.com/Comfy-Org/comfy-mcp) and
   [comfy-cli](https://github.com/Comfy-Org/comfy-cli) by Comfy-Org

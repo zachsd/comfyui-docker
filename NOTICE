@@ -13,6 +13,7 @@ repositories at image-build time, under their own licenses:
 | Project | License | Source |
 |---|---|---|
 | [ComfyUI](https://github.com/comfyanonymous/ComfyUI) | GPL-3.0-or-later | comfyanonymous/ComfyUI |
+| [ComfyUI-Manager](https://github.com/Comfy-Org/ComfyUI-Manager) | GPL-3.0-only | Comfy-Org/ComfyUI-Manager (`comfyui-manager` on PyPI) |
 | [SageAttention](https://github.com/thu-ml/SageAttention) | Apache-2.0 | thu-ml/SageAttention |
 | [comfy-cli](https://github.com/Comfy-Org/comfy-cli) | GPL-3.0 | Comfy-Org/comfy-cli |
 | [comfy-mcp](https://github.com/Comfy-Org/comfy-mcp) | AGPL-3.0-or-later OR Commercial | Comfy-Org/comfy-mcp |

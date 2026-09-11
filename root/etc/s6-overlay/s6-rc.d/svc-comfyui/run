@@ -33,20 +33,84 @@ else
     echo "[svc-comfyui] No CivitAI token set — gated CivitAI model downloads will fail"
 fi
 
-# ComfyUI-Manager auto-installs itself into /custom_nodes on first boot if
-# missing (custom_nodes is a user volume, so this persists across restarts).
-if [[ ! -f "/custom_nodes/ComfyUI-Manager/__init__.py" ]]; then
-    echo "[svc-comfyui] ComfyUI-Manager missing, cloning latest into /custom_nodes..."
-    gosu comfy git clone --depth 1 https://github.com/ltdrdata/ComfyUI-Manager.git \
-        "/custom_nodes/ComfyUI-Manager" || \
-        echo "[svc-comfyui] WARNING: failed to clone ComfyUI-Manager, continuing without it"
+# ComfyUI-Manager v4+ ships as a pip package (`comfyui-manager`), not a
+# custom_nodes/ git-clone folder — v4's repo has no top-level __init__.py at
+# all (moved under comfyui_manager/), so a naive "clone if __init__.py
+# missing" check sees v4 as "corrupted" and silently resets it back to the
+# old pre-v4 ltdrdata/ComfyUI-Manager `main` branch (3.x line) on every
+# restart. `pip install -U --pre comfyui-manager` is also literally what
+# ComfyUI's own "missing node packs" dialog tells operators to run.
+# Idempotent: pip no-ops once already at the latest version.
+echo "[svc-comfyui] Ensuring comfyui-manager (v4+) pip package is up to date..."
+gosu comfy "${VENV:-/opt/venv}/bin/pip" install -q -U --pre comfyui-manager || \
+    echo "[svc-comfyui] WARNING: comfyui-manager pip install/upgrade failed, continuing with whatever version is present"
+
+# Remove any leftover pre-v4 git-clone install under /custom_nodes — it has
+# no __init__.py in v4 either way, so ComfyUI can't load it as a node pack;
+# keeping it around just wastes a requirements-install pass every restart
+# for nothing (and can shadow the real pip package with a stale one).
+if [[ -d "/custom_nodes/ComfyUI-Manager" ]]; then
+    echo "[svc-comfyui] Removing legacy /custom_nodes/ComfyUI-Manager git-clone (superseded by pip package)"
+    rm -rf "/custom_nodes/ComfyUI-Manager"
 fi
 
-for req in /custom_nodes/*/requirements.txt; do
-    if [[ -f "$req" ]]; then
-        echo "[svc-comfyui] Installing custom node deps from: $req"
-        gosu comfy "${VENV:-/opt/venv}/bin/pip" install -q -r "$req" || true
+# Anything a custom node's requirements.txt declares can shadow torch in
+# the venv (pip installs custom node deps straight into the same venv
+# ComfyUI/SageAttention run from — there's no separate PYTHONPATH overlay
+# here), so protect the pinned build: never let
+# torch/torchvision/torchaudio/pip/setuptools/wheel be reinstalled from a
+# custom node's requirements file. An unpinned `torch` line in a custom
+# node's requirements.txt has previously pulled in a newer torch and broken
+# SageAttention with
+# "undefined symbol: ...materialize_cow_storage..." (SageAttention's
+# compiled .so is built against the exact pinned torch ABI).
+PROTECTED_PKGS_REGEX='^(torch|torchvision|torchaudio|pip|setuptools|wheel)([<>=!~ ;].*)?$'
+
+# pip constraints file: pins the resolver to the ALREADY-INSTALLED
+# torch/torchvision/torchaudio versions for any *transitive* dependency
+# (e.g. transformers/accelerate declare torch as a transitive requirement —
+# stripping an explicit top-level `torch` line from a requirements file is
+# NOT enough to stop pip from resolving + installing a different torch via
+# a transitive path).
+CONSTRAINTS_FILE="/tmp/pip-constraints.txt"
+"${VENV:-/opt/venv}/bin/pip" freeze 2>/dev/null | grep -iE '^(torch|torchvision|torchaudio)==' > "$CONSTRAINTS_FILE" || true
+
+for req in /custom_nodes/*/requirements*.txt; do
+    [[ -f "$req" ]] || continue
+    echo "[svc-comfyui] Installing custom node deps from: $req"
+
+    filtered_req="$(mktemp)"
+    # Normalize CRLF -> LF first: a stray \r (Windows line endings, seen in
+    # the wild in real custom-node requirements files) breaks the `$`
+    # anchor in PROTECTED_PKGS_REGEX and lets a "torch\r" line slip through
+    # unfiltered.
+    tr -d '\r' < "$req" > "${filtered_req}.normalized"
+    grep -viE "$PROTECTED_PKGS_REGEX" "${filtered_req}.normalized" > "$filtered_req" || true
+    skipped="$(grep -iE "$PROTECTED_PKGS_REGEX" "${filtered_req}.normalized" || true)"
+    rm -f "${filtered_req}.normalized"
+    if [[ -n "$skipped" ]]; then
+        echo "[svc-comfyui]   skipping protected/base-image package(s) (would shadow pinned versions): $(echo "$skipped" | tr '\n' ' ')"
     fi
+
+    if gosu comfy "${VENV:-/opt/venv}/bin/pip" install -q -c "$CONSTRAINTS_FILE" -r "$filtered_req"; then
+        :
+    else
+        # A single unresolvable/unavailable line makes `pip install -r`
+        # abort the WHOLE file atomically — none of the other, perfectly
+        # installable packages get in either. Retry package-by-package so
+        # one bad line doesn't block everything else the node needs.
+        echo "[svc-comfyui]   Batch install failed — retrying package-by-package (skipping only the lines that fail)"
+        while IFS= read -r line; do
+            line_trimmed="$(echo "$line" | sed 's/#.*//' | xargs)"
+            [[ -z "$line_trimmed" ]] && continue
+            if gosu comfy "${VENV:-/opt/venv}/bin/pip" install -q -c "$CONSTRAINTS_FILE" "$line_trimmed" 2>/tmp/pip_line_err.log; then
+                :
+            else
+                echo "[svc-comfyui]     SKIPPED (unavailable): $line_trimmed — $(tail -1 /tmp/pip_line_err.log)"
+            fi
+        done < "$filtered_req"
+    fi
+    rm -f "$filtered_req"
 done
 
 SAGE_FLAG=""
@@ -94,5 +158,6 @@ exec gosu comfy "${VENV:-/opt/venv}/bin/python" "${COMFY_DIR}/main.py" \
     --user-directory /config \
     --extra-model-paths-config /tmp/extra_model_paths.yaml \
     --disable-pinned-memory \
+    --enable-manager \
     ${SAGE_FLAG} \
     ${COMFYUI_EXTRA_ARGS:-}

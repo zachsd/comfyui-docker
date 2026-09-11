@@ -61,6 +61,44 @@ volumes already had files owned by the old values, either:
   self-heal on restart, or
 - Fix it manually from the host: `sudo chown -R <PUID>:<PGID> ./config ./models ...`
 
+## "Missing node packs... install comfyui-manager" even though Manager is running
+
+This is ComfyUI's generic missing-node-pack message — it fires for **any** node the
+workflow references that isn't installed, and always suggests reinstalling Manager
+regardless of whether Manager itself is fine. Confirm Manager is actually current first:
+
+```bash
+docker exec -it comfyui /opt/venv/bin/pip show comfyui-manager
+```
+
+If that shows a recent version, the real fix is installing the specific missing custom
+node pack (through the Manager UI, or `git clone` into `/custom_nodes` + restart) — not
+reinstalling Manager.
+
+## A custom node's `requirements.txt` breaks SageAttention after restart
+
+Symptom: `ImportError: .../sageattention/_fused...so: undefined symbol:
+...materialize_cow_storage...` after adding a custom node, when SageAttention worked
+before. A custom node's `requirements.txt` declared (or transitively pulled in via
+`transformers`/`accelerate`/etc.) an unpinned `torch`, silently upgrading the venv's torch
+past the exact build SageAttention's compiled `.so` was linked against.
+
+`svc-comfyui/run` guards against this (strips `torch`/`torchvision`/`torchaudio` lines,
+normalizes CRLF line endings first since a stray `\r` can break that filter, and
+constrains any transitive resolution to the already-installed versions) — but a custom
+node that vendors its own bundled torch, bypassing pip entirely, can still slip past all
+three protections. If you hit this, check the offending node's install method before
+assuming it's an image bug.
+
+## One bad line in a custom node's `requirements.txt` blocks every other package in it
+
+`pip install -r requirements.txt` fails **atomically** — a single unavailable package
+(e.g. `decord`, which has no Linux aarch64 wheel) aborts the whole file, so none of the
+node's other, perfectly-installable dependencies get in either. `svc-comfyui/run` retries
+failed files package-by-package and skips only the genuinely broken line(s) — check the
+container logs for `SKIPPED (unavailable): <package>` to see exactly which dependency (and
+therefore which node features) didn't make it in.
+
 ## Rebuilding after a Dockerfile change
 
 Remember: **this image must be built on aarch64/ARM64 hardware** (DGX Spark
